@@ -1,0 +1,145 @@
+#!/usr/bin/env ruby
+
+require 'rubygems'
+require 'librmpd'
+require 'meow'
+require 'amazon/aws/search'
+
+include Amazon::AWS
+include Amazon::AWS::Search
+
+ART_FORMATS = ['jpg', 'png']
+
+# Downloads album art from Amazon
+class FetchAlbumArt
+	attr_reader :file
+
+	def initialize(album, artist, opts={})
+		default_opts = {
+			# Where your album art is stored
+			:art_folder => '~/.albumart/',
+			# Location of your Amazon Developer's Key
+			:amazon_key_path => '~/.amazonkey',
+			# Formats that this script will recognise and try to use
+			:art_formats => ['jpg', 'png'],
+			# Valid names for art files
+			:possible_filenames => [album+' - '+artist, album]
+		}
+
+		# Set default options, but have user-set options
+		# overwrite the defaults.
+		opts = default_opts.merge(opts)
+
+		# Expand paths to absolute paths
+		art_folder = File.expand_path(opts[:art_folder]) + '/'
+		amazon_key_path = File.expand_path(opts[:amazon_key_path])
+
+		# Loop through possible file names and accepted formats,
+		# and exit if the artwork already exists.
+		opts[:possible_filenames].each do |filename|
+			opts[:art_formats].each do |ext|
+				@file = art_folder + filename + '.' + ext
+				return if File.exists? file
+			end
+		end
+
+		# Load your Amazon Key
+		if File.exists? amazon_key_path
+			File.open(amazon_key_path, 'r').each do |l|
+				@amazon_key = l.chomp
+			end
+		end
+
+		if !@amazon_key
+			puts "Missing Amazon Developer's key, can't get artwork."
+			return
+		end
+
+		# Setup query
+		query = ItemSearch.new('Music', { 'Title' => album, 'Artist' => artist })
+		rgroup = ResponseGroup.new(:Images)
+		request = Request.new(@amazon_key)
+
+		# Query Amazon
+		begin
+			response = request.search(query, rgroup)
+		rescue
+			@file = nil
+			return
+		end
+
+		# Get the url of the image
+		url = response.item_search_response.items[0].item[0].large_image.url
+
+		# Download the image
+		data = Net::HTTP.get_response(URI.parse(url))
+
+		# Save the image
+		File.open(@file, 'wb') do |f| 
+			f << data.body
+			f.flush
+		end
+	end
+end
+
+# Moniters MPD, and when the song changes,
+# it displays a Growl notification.
+class MusicMonitor
+	def initialize(server='localhost', port=6600)
+		@mpd = MPD.new server, port
+		@mpd.register_callback(self.method('state_changed'), MPD::STATE_CALLBACK)
+		@mpd.register_callback(self.method('song_changed'), MPD::CURRENT_SONG_CALLBACK)
+		@mpd.connect true
+
+		@default_icon_path = '/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/ToolbarMusicFolderIcon.icns'
+		@icon_path = @default_icon_path
+		@default_icon = Meow.import_image(@icon_path)
+		@icon = @default_icon
+
+		@meep = Meow.new 'MPD', 'Status', @icon
+	end
+
+	# Wait forever
+	def run; loop { sleep 10 }; end
+
+	# Callback for state changes; play, pause, etc.
+	def state_changed(state)
+		now_playing if state == 'play' and @song
+	end
+
+	# Callback for song changes
+	def song_changed(song)
+		@song = song
+
+		art = FetchAlbumArt.new @song.album, @song.artist
+		@icon_path = art.file
+		if art.file
+			@icon = Meow.import_image(@icon_path) 
+		else
+			@icon = @default_icon
+		end
+		now_playing
+	end
+
+	# Helper method for displaying the current song
+	def now_playing
+		if @song.title
+			title = @song.title
+		else
+			# Find the file's extension
+			@song.file =~ /(\.[^\.]+$)/
+			# ...and remove everything but the main filename
+			title = File.basename(@song.file, $1)
+		end
+
+		message = @song.album + ' - ' + @song.artist
+		notify title, message
+	end
+
+	# Send a notification to the messaging system. In this case, Growl
+	def notify(title, message='', icon=@icon)
+		@meep.notify(title, message, {:icon => icon})
+	end
+end
+
+MusicMonitor.new.run
