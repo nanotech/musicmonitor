@@ -2,7 +2,6 @@
 
 require 'rubygems'
 require 'librmpd'
-require 'meow'
 require 'amazon/aws/search'
 require 'scrobbler'
 require 'digest/md5'
@@ -132,6 +131,12 @@ module Scrobbler
 	end
 end
 
+class String
+	def escape_single_quote
+		self.gsub(/'/, "'\\\\\''")
+	end
+end
+
 # Moniters MPD, and when the song changes,
 # it displays a Growl notification.
 #
@@ -146,12 +151,7 @@ class MusicMonitor
 		@mpd.connect true
 
 		# Setup Growl
-		@default_icon_path = '/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/ToolbarMusicFolderIcon.icns'
-		@icon_path = @default_icon_path
-		@default_icon = Meow.import_image(@icon_path)
-		@icon = @default_icon
-
-		@meep = Meow.new 'MPD', 'Status', @icon
+		@default_icon = '/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/ToolbarMusicFolderIcon.icns'
 
 		# Load last.fm credentials
 		lastfm_config = File.expand_path(lastfm_config)
@@ -168,20 +168,23 @@ class MusicMonitor
 			puts 'Missing last.fm credentials at ' + lastfm_config
 		end
 
+		# Set status variables
+		@song = nil
+		@elapsed = 0
+		@scrobbles = []
+		@lastfm_playing_sent = false
+		@lastfm_can_scrobble = false
+
 		# Connect to last.fm
 		@lastfm = Scrobbler::SimpleAuth.new(:user => lastfm_user, :password => lastfm_pass)
 		@lastfm.handshake!
 
-		# Set status variables
-		@song = nil
-		@elapsed = 0
-		@lastfm_playing_sent = false
-		@lastfm_can_scrobble = false
+		puts @lastfm.status
 	end
 
 	# Run forever
 	def run
-		sleep_time = 5 # Interval at which the loop code is run, in seconds.
+		sleep_time = 10 # Interval at which the loop code is run, in seconds.
 
 		loop do
 
@@ -191,20 +194,14 @@ class MusicMonitor
 				# Only do last.fm stuff if connected to last.fm
 				if @lastfm.status == 'OK'
 
-					# Only scrobble tracks that are longer than 30 seconds
+					# Only scrobble tracks that are longer than 30 seconds.
 					if @song.time.to_i > 30
 
 						# Don't send multiple times, or if we haven't played more
 						# than the @scrobble_time.
 						if !@lastfm_can_scrobble and (@scrobble_time - @elapsed) <= 0
-							@scrobble = Scrobbler::Scrobble.new(:session_id => @lastfm.session_id,
-																:submission_url => @lastfm.submission_url,
-																:artist => @song.artist,
-																:track => @song.title,
-																:album => @song.album,
-																:time => @started_playing,
-																:length => @song.time,
-																:track_number => @song.track)
+
+							@scrobbles.push lastfm_scrobble
 
 							# Scrobbles aren't sent immediately,
 							# they're sent when the song changes.
@@ -215,13 +212,7 @@ class MusicMonitor
 
 					# Don't send multiple times
 					if !@lastfm_playing_sent
-						playing = Scrobbler::Playing.new(:session_id => @lastfm.session_id,
-														 :now_playing_url => @lastfm.now_playing_url,
-														 :artist => @song.artist,
-														 :track => @song.title,
-														 :album => @song.album,
-														 :length => @song.time,
-														 :track_number => @song.track)
+						playing = lastfm_play
 
 						# Send now playing information immediately
 						playing.submit!
@@ -233,6 +224,7 @@ class MusicMonitor
 				@elapsed += sleep_time
 			end
 
+			GC.start
 			sleep sleep_time
 		end
 	end
@@ -260,13 +252,14 @@ class MusicMonitor
 		@elapsed = @mpd.status['time'].split(':')[0].to_i
 
 		# Scrobble the track, if we can.
-		@scrobble.submit! if @scrobble
-		@scrobble = nil
+		@scrobbles.each do |scrobble|
+			scrobble.submit!
+			@scrobbles.delete(scrobble)
+		end
 
 		# Get album art
 		art = FetchAlbumArt.new @song.album, @song.artist
-		@icon_path = art.file
-		@icon = (art.file) ? Meow.import_image(@icon_path) : @default_icon
+		@icon = (art.file) ? art.file : @default_icon
 
 		# Send notifications
 		now_playing
@@ -287,9 +280,36 @@ class MusicMonitor
 		notify title, message
 	end
 
-	# Send a notification to the messaging system. In this case, Growl
+	# Send a notification to the messaging system. In this case, Growl.
 	def notify(title, message='', icon=@icon)
-		@meep.notify(title, message, {:icon => icon})
+		escaped_title = title.escape_single_quote
+		escaped_message = message.escape_single_quote
+
+		command = "growlnotify '#{escaped_title}' -m '#{escaped_message}' --image '#{icon}' -n '#{self.class.name}'"
+		`#{command}`
+	end
+
+	# Create a Scrobbler::Playing object
+	def lastfm_play
+		Scrobbler::Playing.new(:session_id => @lastfm.session_id,
+							   :now_playing_url => @lastfm.now_playing_url,
+							   :artist => @song.artist,
+							   :track => @song.title,
+							   :album => @song.album,
+							   :length => @song.time,
+							   :track_number => @song.track)
+	end
+
+	# Create a Scrobbler::Scrobble object
+	def lastfm_scrobble
+		Scrobbler::Scrobble.new(:session_id => @lastfm.session_id,
+								:submission_url => @lastfm.submission_url,
+								:artist => @song.artist,
+								:track => @song.title,
+								:album => @song.album,
+								:time => @started_playing,
+								:length => @song.time,
+								:track_number => @song.track)
 	end
 end
 
