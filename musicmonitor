@@ -1,205 +1,36 @@
 #!/usr/bin/env ruby
 
+# Config
+ART_FORMATS = ['jpg', 'png']
+VERBOSE = ARGV.include?('--verbose')
+
+# Follow symlinks to find the original file.
+def real_file(file)
+	file = File.expand_path(file)
+
+	while File.symlink?(file)
+		file = File.expand_path(File.readlink(file), File.dirname(file))
+	end
+
+	file
+end
+
+# Move in to the real folder so we can load plugins and libs.
+real_dir = File.dirname(real_file(__FILE__))
+Dir.chdir(real_dir)
+
+# Global Gems
 require 'rubygems'
 require 'librmpd'
-require 'scrobbler'
-require 'amazon/aws/search'
-include Amazon::AWS
-include Amazon::AWS::Search
 
-ART_FORMATS = ['jpg', 'png']
+# Local non-plugin helpers
+$LOAD_PATH << 'lib'
 
-DEBUG = true
-
-# Downloads album art from Amazon
-class FetchAlbumArt
-	attr_reader :file
-
-	def initialize(album, artist, opts={})
-		default_opts = {
-			# Where your album art is stored
-			:art_folder => '~/.albumart/',
-			# Location of your Amazon Developer's Key
-			:amazon_key_path => '~/.amazonkey',
-			# Formats that this script will recognise and try to use
-			:art_formats => ['jpg', 'png'],
-			# Valid names for art files
-			:possible_filenames => [album+' - '+artist, album]
-		}
-
-		# Set default options, but have user-set options
-		# overwrite the defaults.
-		opts = default_opts.merge(opts)
-
-		# Expand paths to absolute paths
-		art_folder = File.expand_path(opts[:art_folder]) + '/'
-		amazon_key_path = File.expand_path(opts[:amazon_key_path])
-
-		# Loop through possible file names and accepted formats,
-		# and exit if the artwork already exists.
-		opts[:possible_filenames].each do |filename|
-			opts[:art_formats].each do |ext|
-				filename = filename.gsub(/[\/\\]/, '_')
-				@file = "#{art_folder}#{filename}.#{ext}"
-				return if File.exists? @file
-			end
-		end
-
-		# Load your Amazon Key
-		if File.exists? amazon_key_path
-			File.open(amazon_key_path, 'r').each do |l|
-				@amazon_key = l.chomp
-			end
-		end
-
-		if !@amazon_key
-			puts "Missing Amazon Developer's key, can't get artwork."
-			return
-		end
-
-		# Setup query
-		query = ItemSearch.new('Music', { 'Title' => album, 'Artist' => artist })
-		rgroup = ResponseGroup.new(:Images)
-		request = Request.new(@amazon_key)
-
-		# Query Amazon
-		begin
-			response = request.search(query, rgroup)
-		rescue
-			@file = nil
-			return
-		end
-
-		# Get the url of the image
-		begin
-			url = response.item_search_response.items[0].item[0].large_image.url
-		rescue NoMethodError
-			return
-		end
-
-		# Download the image
-		data = Net::HTTP.get_response(URI.parse(url))
-
-		# Save the image
-		File.open(@file, 'wb') do |f| 
-			f << data.body
-			f.flush
-		end
-	end
-end
-
-# Code copied from Scrobbler 0.2.2
-# <http://scrobbler.rubyforge.org/>
-module Scrobbler
-	class SimpleAuth
-
-		# Override to enable authentication using pre-hashed passwords.
-		# Won't work if a user's un-hashed password looks a hash.
-		def handshake!
-			# Begin edits
-			require 'digest/md5'
-
-			if @password =~ /^[0-9a-f]{32}$/i
-				password_hash = @password
-			else
-				password_hash = Digest::MD5.hexdigest(@password)
-			end
-			# End edits
-
-			timestamp = Time.now.to_i.to_s
-			token = Digest::MD5.hexdigest(password_hash + timestamp)
-
-			query = { :hs => 'true',
-					  :p => AUTH_VER,
-					  :c => @client_id,
-					  :v => @client_ver,
-					  :u => @user,
-					  :t => timestamp,
-					  :a => token }
-			result = @connection.get('/', query)
-
-			@status = result.split(/\n/)[0]
-			case @status
-			when /OK/
-				@session_id, @now_playing_url, @submission_url = result.split(/\n/)[1,3]
-			when /BANNED/
-				raise BannedError # something is wrong with the gem, check for an update
-			when /BADAUTH/
-				raise BadAuthError # invalid user/password
-			when /FAILED/
-				raise RequestFailedError, @status
-			when /BADTIME/
-				raise BadTimeError # system time is way off
-			else
-				raise RequestFailedError
-			end
-		end
-	end
-end
-
-class String
-	def escape_single_quote
-		self.gsub(/'/, "'\\\\\''")
-	end
-end
-
-# Moniters MPD, and when the song changes,
-# it displays a Growl notification.
-#
-# It can also scrobble to last.fm.
-#
-class MusicMonitor
-	def initialize(server='localhost', port=6600, lastfm_config='~/.lastfm')
-		Thread.abort_on_exception = true
-
-		# Set status variables
-		@song = nil
-		@elapsed = 0
-		@scrobbles = []
-		@lastfm_playing_sent = false
-		@lastfm_can_scrobble = false
-
-		# Connect to MPD
-		debug 'Connecting to MPD... ', false
-		$stdout.flush
-		@mpd = MPD.new server, port
-		@mpd.connect
-		@last_state = @mpd.status['state']
-		debug 'Done'
-
-		# Setup Growl
-		@default_icon = '/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/ToolbarMusicFolderIcon.icns'
-
-		# Load last.fm credentials
-		debug 'Loading last.fm config... ', false
-		lastfm_config = File.expand_path(lastfm_config)
-		if File.exists? lastfm_config
-			lines = []
-
-			File.open(lastfm_config, 'r').each do |l|
-				lines << l.chomp
-			end
-
-			lastfm_user = lines[0]
-			lastfm_pass = lines[1]
-		else
-			puts 'Missing last.fm credentials at ' + lastfm_config
-		end
-
-		debug 'Done'
-
-		# Connect to last.fm
-		Thread.new do
-			debug 'Connecting to last.fm... ', false
-			@lastfm = Scrobbler::SimpleAuth.new(:user => lastfm_user, :password => lastfm_pass)
-			@lastfm.handshake!
-			debug @lastfm.status
-		end
-	end
-
-	# Simple debug output
+# The MusicMonitor Module
+module MusicMonitor
+	# Simple debug outputter
 	def debug(message, newline=true)
-		if DEBUG
+		if VERBOSE
 			if newline
 				if message.respond_to? :to_str
 					puts message
@@ -213,7 +44,54 @@ class MusicMonitor
 			$stdout.flush
 		end
 	end
+end
 
+# This might get some default methods later, but for now,
+# it's just used when detecting plugins.
+class MusicMonitor::Plugin; end
+
+# Moniters MPD, and when the song changes,
+# it calls plugin hooks.
+#
+class MusicMonitor::App
+	include MusicMonitor
+
+	def initialize(server='localhost', port=6600)
+		Thread.abort_on_exception = true
+
+		# Set status variables
+		@song = {}
+		@elapsed = 0
+
+		# Connect to MPD
+		debug 'Connecting to MPD... ', false
+		$stdout.flush
+		@mpd = MPD.new server, port
+		@mpd.connect
+		@last_state = @mpd.status['state']
+		debug 'Done'
+
+		# Auto-load plugins
+		debug 'Searching for plugins...', false
+		Dir.glob('plugins/*.rb').each do |f|
+			require f
+		end
+		debug 'Done'
+
+		@plugins = []
+
+		# Find plugins and initialize them.
+		debug 'Initializing plugins...'
+		ObjectSpace.each_object(Class) do |c|
+			if c.superclass == MusicMonitor::Plugin
+				@plugins << c.new
+			end
+		end
+		debug "Done initialization\n\n"
+	end
+
+	# Check if the song or state changed and run
+	# routine plugin hooks.
 	def update
 		new_song = @mpd.current_song
 
@@ -222,38 +100,14 @@ class MusicMonitor
 		end
 
 		# Only run if connected to mpd
-		if @song
+		unless @song.empty?
 
 			new_state = @mpd.status['state']
-			state_changed new_state if @last_state != new_state
-
-			# Only scrobble if connected to last.fm
-			if @lastfm and @lastfm.status == 'OK'
-
-				# Only scrobble tracks that are longer than 30 seconds.
-				if @song.time.to_i > 30
-
-					# Don't send multiple times, or if we haven't played more
-					# than the @scrobble_time.
-					if !@lastfm_can_scrobble and (@scrobble_time - @elapsed) <= 0
-
-						@scrobbles.push lastfm_scrobble
-
-						# Scrobbles aren't sent immediately,
-						# they're sent when the song changes.
-
-						@lastfm_can_scrobble = true
-					end
-				end
-
-				# Don't send multiple times
-				if !@lastfm_playing_sent
-					lastfm_play
-					@lastfm_playing_sent = true
-				end
+			if @last_state != new_state
+				state_changed new_state 
 			end
 
-			@last_state = @mpd.status['state']
+			run_hooks_for :update, @song, @elapsed
 		end
 	end
 
@@ -272,20 +126,16 @@ class MusicMonitor
 
 	# Callback for state changes; play, pause, etc.
 	def state_changed(state)
+		debug state
+		@last_state = @mpd.status['state']
 		now_playing if state == 'play' and @song
 	end
 
 	# Callback for song changes
 	def song_changed(song)
-		@last_song = @song
-		@song = song
-
-		if @song
-			# Reset temporary song variables
-			@lastfm_playing_sent = false
-			@lastfm_can_scrobble = false
-			@scrobble_time = [@song.time.to_i / 2, 240].min
-			@started_playing = Time.new
+		if song and song != @song
+			@last_song = @song
+			@song = song
 
 			# Set @elapsed to the current song position in case
 			# MusicMonitor was started during an already playing song.
@@ -294,25 +144,10 @@ class MusicMonitor
 			# starting a new track, the current position should be zero.
 			@elapsed = @mpd.status['time'].split(':')[0].to_i
 
-			submit_scrobbles
-
-			# Get album art
-			art = FetchAlbumArt.new @song.album, @song.artist
-			@icon = (art.file) ? art.file : @default_icon
+			run_hooks_for :song_changed, @song
 
 			# Send notifications
 			now_playing
-		end
-	end
-
-	# Scrobble queued tracks
-	def submit_scrobbles
-		if @lastfm and @lastfm.status == 'OK'
-			@scrobbles.each do |scrobble|
-				debug "Submit #{scrobble}"
-				scrobble.submit!
-				@scrobbles.delete(scrobble)
-			end
 		end
 	end
 
@@ -327,47 +162,16 @@ class MusicMonitor
 			title = File.basename(@song.file, $1)
 		end
 
-		message = @song.album + ' - ' + @song.artist
-		notify title, message
+		run_hooks_for :notify, title, @song
 	end
 
-	# Send a notification to the messaging system. In this case, Growl.
-	def notify(title, message='', icon=@icon)
-		escaped_title = title.escape_single_quote
-		escaped_message = message.escape_single_quote
-
-		command = "growlnotify '#{escaped_title}' -m '#{escaped_message}' --image '#{icon}' -n '#{self.class.name}'"
-		`#{command}`
-	end
-
-	# Tell last.fm what's playing.
-	def lastfm_play
-		playing = Scrobbler::Playing.new(
-			:session_id => @lastfm.session_id,
-			:now_playing_url => @lastfm.now_playing_url,
-			:artist => @song.artist,
-			:track => @song.title,
-			:album => @song.album,
-			:length => @song.time,
-			:track_number => @song.track
-		)
-
-		# Send now playing information immediately
-		playing.submit!
-		playing
-	end
-
-	# Create a Scrobbler::Scrobble object
-	def lastfm_scrobble
-		Scrobbler::Scrobble.new(:session_id => @lastfm.session_id,
-								:submission_url => @lastfm.submission_url,
-								:artist => @song.artist,
-								:track => @song.title,
-								:album => @song.album,
-								:time => @started_playing,
-								:length => @song.time,
-								:track_number => @song.track)
+	# Helper to run all the hooks for a method.
+	def run_hooks_for(method, *args)
+		@plugins.each do |p|
+			p.send(method, *args) if p.respond_to? method
+		end
 	end
 end
 
-MusicMonitor.new.run
+# Create and run MusicMonitor
+MusicMonitor::App.new.run
