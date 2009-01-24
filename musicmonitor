@@ -2,14 +2,14 @@
 
 require 'rubygems'
 require 'librmpd'
-require 'amazon/aws/search'
 require 'scrobbler'
-require 'digest/md5'
-
+require 'amazon/aws/search'
 include Amazon::AWS
 include Amazon::AWS::Search
 
 ART_FORMATS = ['jpg', 'png']
+
+DEBUG = true
 
 # Downloads album art from Amazon
 class FetchAlbumArt
@@ -39,8 +39,9 @@ class FetchAlbumArt
 		# and exit if the artwork already exists.
 		opts[:possible_filenames].each do |filename|
 			opts[:art_formats].each do |ext|
-				@file = art_folder + filename + '.' + ext
-				return if File.exists? file
+				filename = filename.gsub(/[\/\\]/, '_')
+				@file = "#{art_folder}#{filename}.#{ext}"
+				return if File.exists? @file
 			end
 		end
 
@@ -70,7 +71,11 @@ class FetchAlbumArt
 		end
 
 		# Get the url of the image
-		url = response.item_search_response.items[0].item[0].large_image.url
+		begin
+			url = response.item_search_response.items[0].item[0].large_image.url
+		rescue NoMethodError
+			return
+		end
 
 		# Download the image
 		data = Net::HTTP.get_response(URI.parse(url))
@@ -91,8 +96,9 @@ module Scrobbler
 		# Override to enable authentication using pre-hashed passwords.
 		# Won't work if a user's un-hashed password looks a hash.
 		def handshake!
-
 			# Begin edits
+			require 'digest/md5'
+
 			if @password =~ /^[0-9a-f]{32}$/i
 				password_hash = @password
 			else
@@ -144,16 +150,28 @@ end
 #
 class MusicMonitor
 	def initialize(server='localhost', port=6600, lastfm_config='~/.lastfm')
+		Thread.abort_on_exception = true
+
+		# Set status variables
+		@song = nil
+		@elapsed = 0
+		@scrobbles = []
+		@lastfm_playing_sent = false
+		@lastfm_can_scrobble = false
+
 		# Connect to MPD
+		debug 'Connecting to MPD... ', false
+		$stdout.flush
 		@mpd = MPD.new server, port
-		@mpd.register_callback(self.method('state_changed'), MPD::STATE_CALLBACK)
-		@mpd.register_callback(self.method('song_changed'), MPD::CURRENT_SONG_CALLBACK)
-		@mpd.connect true
+		@mpd.connect
+		@last_state = @mpd.status['state']
+		debug 'Done'
 
 		# Setup Growl
 		@default_icon = '/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/ToolbarMusicFolderIcon.icns'
 
 		# Load last.fm credentials
+		debug 'Loading last.fm config... ', false
 		lastfm_config = File.expand_path(lastfm_config)
 		if File.exists? lastfm_config
 			lines = []
@@ -168,64 +186,87 @@ class MusicMonitor
 			puts 'Missing last.fm credentials at ' + lastfm_config
 		end
 
-		# Set status variables
-		@song = nil
-		@elapsed = 0
-		@scrobbles = []
-		@lastfm_playing_sent = false
-		@lastfm_can_scrobble = false
+		debug 'Done'
 
 		# Connect to last.fm
-		@lastfm = Scrobbler::SimpleAuth.new(:user => lastfm_user, :password => lastfm_pass)
-		@lastfm.handshake!
+		Thread.new do
+			debug 'Connecting to last.fm... ', false
+			@lastfm = Scrobbler::SimpleAuth.new(:user => lastfm_user, :password => lastfm_pass)
+			@lastfm.handshake!
+			debug @lastfm.status
+		end
+	end
 
-		puts @lastfm.status
+	# Simple debug output
+	def debug(message, newline=true)
+		if DEBUG
+			if newline
+				if message.respond_to? :to_str
+					puts message
+				else
+					p message
+				end
+			else
+				print message
+			end
+
+			$stdout.flush
+		end
+	end
+
+	def update
+		new_song = @mpd.current_song
+
+		if new_song != @last_song
+			song_changed @mpd.current_song
+		end
+
+		# Only run if connected to mpd
+		if @song
+
+			new_state = @mpd.status['state']
+			state_changed new_state if @last_state != new_state
+
+			# Only scrobble if connected to last.fm
+			if @lastfm and @lastfm.status == 'OK'
+
+				# Only scrobble tracks that are longer than 30 seconds.
+				if @song.time.to_i > 30
+
+					# Don't send multiple times, or if we haven't played more
+					# than the @scrobble_time.
+					if !@lastfm_can_scrobble and (@scrobble_time - @elapsed) <= 0
+
+						@scrobbles.push lastfm_scrobble
+
+						# Scrobbles aren't sent immediately,
+						# they're sent when the song changes.
+
+						@lastfm_can_scrobble = true
+					end
+				end
+
+				# Don't send multiple times
+				if !@lastfm_playing_sent
+					lastfm_play
+					@lastfm_playing_sent = true
+				end
+			end
+
+			@last_state = @mpd.status['state']
+		end
 	end
 
 	# Run forever
 	def run
-		sleep_time = 10 # Interval at which the loop code is run, in seconds.
+		delay = 2 # Interval at which the loop code is run, in seconds.
 
 		loop do
+			update
+			sleep delay
 
-			# Only run if connected to mpd
-			if @song
-
-				# Only do last.fm stuff if connected to last.fm
-				if @lastfm.status == 'OK'
-
-					# Only scrobble tracks that are longer than 30 seconds.
-					if @song.time.to_i > 30
-
-						# Don't send multiple times, or if we haven't played more
-						# than the @scrobble_time.
-						if !@lastfm_can_scrobble and (@scrobble_time - @elapsed) <= 0
-
-							@scrobbles.push lastfm_scrobble
-
-							# Scrobbles aren't sent immediately,
-							# they're sent when the song changes.
-
-							@lastfm_can_scrobble = true
-						end
-					end
-
-					# Don't send multiple times
-					if !@lastfm_playing_sent
-						playing = lastfm_play
-
-						# Send now playing information immediately
-						playing.submit!
-						@lastfm_playing_sent = true
-					end
-				end
-
-				# Increment the elapsed clock based on the sleep time
-				@elapsed += sleep_time
-			end
-
-			GC.start
-			sleep sleep_time
+			# Increment the elapsed clock based on the sleep time
+			@elapsed += delay
 		end
 	end
 
@@ -236,33 +277,43 @@ class MusicMonitor
 
 	# Callback for song changes
 	def song_changed(song)
+		@last_song = @song
 		@song = song
 
-		# Reset temporary song variables
-		@lastfm_playing_sent = false
-		@lastfm_can_scrobble = false
-		@scrobble_time = [@song.time.to_i / 2, 240].min
-		@started_playing = Time.new
+		if @song
+			# Reset temporary song variables
+			@lastfm_playing_sent = false
+			@lastfm_can_scrobble = false
+			@scrobble_time = [@song.time.to_i / 2, 240].min
+			@started_playing = Time.new
 
-		# Set @elapsed to the current song position in case
-		# MusicMonitor was started during an already playing song.
-		#
-		# In other cases, this still should be safe to use as when
-		# starting a new track, the current position should be zero.
-		@elapsed = @mpd.status['time'].split(':')[0].to_i
+			# Set @elapsed to the current song position in case
+			# MusicMonitor was started during an already playing song.
+			#
+			# In other cases, this still should be safe to use as when
+			# starting a new track, the current position should be zero.
+			@elapsed = @mpd.status['time'].split(':')[0].to_i
 
-		# Scrobble the track, if we can.
-		@scrobbles.each do |scrobble|
-			scrobble.submit!
-			@scrobbles.delete(scrobble)
+			submit_scrobbles
+
+			# Get album art
+			art = FetchAlbumArt.new @song.album, @song.artist
+			@icon = (art.file) ? art.file : @default_icon
+
+			# Send notifications
+			now_playing
 		end
+	end
 
-		# Get album art
-		art = FetchAlbumArt.new @song.album, @song.artist
-		@icon = (art.file) ? art.file : @default_icon
-
-		# Send notifications
-		now_playing
+	# Scrobble queued tracks
+	def submit_scrobbles
+		if @lastfm and @lastfm.status == 'OK'
+			@scrobbles.each do |scrobble|
+				debug "Submit #{scrobble}"
+				scrobble.submit!
+				@scrobbles.delete(scrobble)
+			end
+		end
 	end
 
 	# Helper method for displaying the current song
@@ -289,15 +340,21 @@ class MusicMonitor
 		`#{command}`
 	end
 
-	# Create a Scrobbler::Playing object
+	# Tell last.fm what's playing.
 	def lastfm_play
-		Scrobbler::Playing.new(:session_id => @lastfm.session_id,
-							   :now_playing_url => @lastfm.now_playing_url,
-							   :artist => @song.artist,
-							   :track => @song.title,
-							   :album => @song.album,
-							   :length => @song.time,
-							   :track_number => @song.track)
+		playing = Scrobbler::Playing.new(
+			:session_id => @lastfm.session_id,
+			:now_playing_url => @lastfm.now_playing_url,
+			:artist => @song.artist,
+			:track => @song.title,
+			:album => @song.album,
+			:length => @song.time,
+			:track_number => @song.track
+		)
+
+		# Send now playing information immediately
+		playing.submit!
+		playing
 	end
 
 	# Create a Scrobbler::Scrobble object
