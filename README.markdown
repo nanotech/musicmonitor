@@ -10,12 +10,10 @@ Requirements
 To run MusicMonitor, you'll need the following gems:
 
 * [librmpd][]
-* [meow][]
 * [ruby-aaws][]
 * [scrobbler][]
 
 [librmpd]: http://librmpd.rubyforge.org/
-[meow]: http://meow.rubyforge.org/
 [ruby-aaws]: http://www.caliban.org/ruby/ruby-aws/
 [scrobbler]: http://scrobbler.rubyforge.org/
 
