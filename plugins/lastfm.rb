@@ -36,16 +36,21 @@ class MusicMonitor::LastFM < MusicMonitor::Plugin
 	def submit_scrobbles
 		if @lastfm and @lastfm.status == 'OK'
 			@scrobbles.each do |scrobble|
-				debug "Submit #{scrobble}"
-				scrobble.submit!
-				@scrobbles.delete(scrobble)
+				if submit scrobble
+					debug "#{scrobble.track} submitted to last.fm"
+					@scrobbles.delete(scrobble)
+				else
+					debug "Failed submitting #{scrobble}"
+				end
 			end
 		end
 	end
 
 	def update(song, elapsed)
-		# Only scrobble if connected to last.fm
-		if @lastfm and @lastfm.status == 'OK'
+		# Only scrobble if connected to last.fm and the
+		# track has an artist and name
+		if @lastfm and @lastfm.status == 'OK' and
+			song['artist'] and song['title']
 
 			# Only scrobble tracks that are longer than 30 seconds.
 			if song['time'].to_i > 30
@@ -95,14 +100,7 @@ class MusicMonitor::LastFM < MusicMonitor::Plugin
 		)
 
 		# Send now playing information immediately
-		begin
-			playing.submit!
-		rescue BadSessionError
-			# Reconnect to last.fm
-			@lastfm.handshake!
-			retry
-		end
-
+		submit playing
 		playing
 	end
 
@@ -118,6 +116,26 @@ class MusicMonitor::LastFM < MusicMonitor::Plugin
 			:length => song['time'],
 			:track_number => song['track']
 		)
+	end
+
+	def submit(scrobble)
+		retries = 0
+		begin
+			scrobble.submit!
+			return true
+		rescue BadSessionError
+			debug "(BadSessionError: Retry #{retries})"
+			if retries += 1 < 5
+				debug "Reconnecting to last.fm... (Retry #{retries})"
+				sleep 2 if retries > 2
+				# Reconnect to last.fm
+				@lastfm.handshake!
+				retry
+			else
+				debug "Scrobble failed. (#{retries} retries)"
+				return false
+			end
+		end
 	end
 end
 

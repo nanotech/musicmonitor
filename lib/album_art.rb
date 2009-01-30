@@ -15,7 +15,7 @@ class MusicMonitor::AlbumArt
 			# Formats that this script will recognise and try to use
 			:art_formats => ['jpg', 'png'],
 			# Valid names for art files
-			:possible_filenames => [album+' - '+artist, album]
+			:possible_filenames => [album.to_s+' - '+artist.to_s, album.to_s]
 		}
 
 		# Set default options, but have user-set options

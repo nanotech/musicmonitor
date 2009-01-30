@@ -10,10 +10,19 @@ class MusicMonitor::Growl < MusicMonitor::Plugin
 	# Send a notification to Growl.
 	def notify(title, song)
 		escaped_title = title.escape_for_terminal
-		message = song.album + ' - ' + song.artist
-		message = message.escape_for_terminal
 
-		command = "growlnotify '#{escaped_title}' -m '#{message}' -n MusicMonitor -w --image '#{@icon}'"
+		if song['album'] and song['artist']
+			message = song['album'] + ' - ' + song['artist']
+		else
+			message = song['album'] || song['artist']
+		end
+
+		return false unless message
+		@icon = @default_icon.dup unless @icon
+		message = message.escape_for_terminal
+		icon = @icon.escape_for_terminal
+
+		command = "growlnotify '#{escaped_title}' -m '#{message}' -n MusicMonitor -w --image '#{icon}'"
 		IO.popen(command)
 	end
 
