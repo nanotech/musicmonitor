@@ -1,0 +1,27 @@
+#!/usr/bin/env ruby
+
+# 
+# Small command-line frontend to the AlbumArt class.
+#
+
+# Follow symlinks to find the original file.
+def real_file(file)
+	file = File.expand_path(file)
+
+	while File.symlink?(file)
+		file = File.expand_path(File.readlink(file), File.dirname(file))
+	end
+
+	file
+end
+
+# Move in to the real folder so we can load plugins and libs.
+real_dir = File.dirname(real_file(__FILE__))
+Dir.chdir(real_dir)
+
+require 'lib/album_art'
+
+default_icon = '/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/ToolbarMusicFolderIcon.icns'
+
+art = AlbumArt.new ARGV[0].to_s, ARGV[1].to_s
+puts (art.file) ? art.file : default_icon

@@ -1,10 +1,6 @@
 # Downloads album art from Amazon
-class MusicMonitor::AlbumArt
+class AlbumArt
 	attr_reader :file
-
-	require 'amazon/aws/search'
-	include Amazon::AWS
-	include Amazon::AWS::Search
 
 	def initialize(album, artist, opts={})
 		default_opts = {
@@ -15,8 +11,12 @@ class MusicMonitor::AlbumArt
 			# Formats that this script will recognise and try to use
 			:art_formats => ['jpg', 'png'],
 			# Valid names for art files
-			:possible_filenames => [album.to_s+' - '+artist.to_s, album.to_s]
+			:possible_filenames => [album.to_s+' - '+artist.to_s, album.to_s],
+			# Invalid characters to be removed
+			:invalid_chars => ['/', '\\', ':'],
 		}
+
+		return if album.empty? and artist.empty?
 
 		# Set default options, but have user-set options
 		# overwrite the defaults.
@@ -30,7 +30,9 @@ class MusicMonitor::AlbumArt
 		# and exit if the artwork already exists.
 		opts[:possible_filenames].each do |filename|
 			opts[:art_formats].each do |ext|
-				filename = filename.gsub(/[\/\\]/, '_')
+				opts[:invalid_chars].each do |char|
+					filename = filename.gsub(char, '_')
+				end
 				@file = "#{art_folder}#{filename}.#{ext}"
 				return if File.exists? @file
 			end
@@ -47,6 +49,20 @@ class MusicMonitor::AlbumArt
 			puts "Missing Amazon Developer's key, can't get artwork."
 			return
 		end
+
+		# Only load the amazon gem if we need it, which we do by now.
+
+		begin
+			require 'amazon/aws/search'
+			self.class.class_eval do
+				include Amazon::AWS
+				include Amazon::AWS::Search
+			end
+		rescue LoadError
+			require 'rubygems'
+			retry
+		end
+
 
 		# Setup query
 		query = ItemSearch.new('Music', { 'Title' => album, 'Artist' => artist })
