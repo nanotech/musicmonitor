@@ -3,6 +3,11 @@ class AlbumArt
 	attr_reader :file
 
 	def initialize(album, artist, opts={})
+		album = album.to_s
+		artist = artist.to_s
+
+		return if album.empty? and artist.empty?
+
 		default_opts = {
 			# Where your album art is stored
 			:art_folder => '~/.albumart/',
@@ -11,12 +16,10 @@ class AlbumArt
 			# Formats that this script will recognise and try to use
 			:art_formats => ['jpg', 'png'],
 			# Valid names for art files
-			:possible_filenames => [album.to_s+' - '+artist.to_s, album.to_s],
+			:possible_filenames => filenames(album, artist),
 			# Invalid characters to be removed
 			:invalid_chars => ['/', '\\', ':'],
 		}
-
-		return if album.empty? and artist.empty?
 
 		# Set default options, but have user-set options
 		# overwrite the defaults.
@@ -35,6 +38,7 @@ class AlbumArt
 				end
 				@file = "#{art_folder}#{filename}.#{ext}"
 				return if File.exists? @file
+				@file = nil # nothing found
 			end
 		end
 
@@ -73,7 +77,6 @@ class AlbumArt
 		begin
 			response = request.search(query, rgroup)
 		rescue
-			@file = nil
 			return
 		end
 
@@ -87,10 +90,30 @@ class AlbumArt
 		# Download the image
 		data = Net::HTTP.get_response(URI.parse(url))
 
+		@file = filename(album, artist, '.jpg', art_folder)
+
 		# Save the image
 		File.open(@file, 'wb') do |f| 
 			f << data.body
 			f.flush
+		end
+	end
+
+	def filename(album, artist, postfix='', prefix='')
+		file = if album.empty?
+				   artist
+			   elsif artist.empty?
+				   album
+			   else
+				   album + " - " + artist
+			   end
+
+		prefix + file + postfix
+	end
+
+	def filenames(album, artist, *args)
+		[[album, artist], [album, ''], ['', artist]].map do |x|
+			filename *x.concat(args)
 		end
 	end
 end
